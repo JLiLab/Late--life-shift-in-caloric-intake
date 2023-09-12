@@ -1,0 +1,840 @@
+---
+title: "RNA-seq analysis of effects of dietary shift at Day50"
+output: html_notebook
+---
+
+# Load packages
+```{r message=F}
+library(DESeq2);library(EnhancedVolcano);library(tidyverse);library(edgeR)
+library("pheatmap")
+library("RColorBrewer")
+library(EnhancedVolcano)
+library(clusterProfiler)
+library("AnnotationDbi")
+library("org.Dm.eg.db")
+```
+
+# Obtain read count matrix and sample informaiton
+Inspection of feature count results
+```{r}
+fc=readRDS("featureCount_stranded.rds")
+stat <- fc$stat %>% gather(SampleID, value, 2:55) %>% filter(value>0)
+stat$SampleID <- gsub(".bamAligned.out.bam","",stat$SampleID)
+
+p.mapping=ggplot(data=stat, aes(x=SampleID,y=value,fill=Status))+
+  geom_bar(stat="identity")+
+  facet_grid(Status~., scales = "free")+
+  labs(y = "read counts", x = "")+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  theme(legend.position = "none")
+p.mapping
+```
+
+```{r}
+pdf("figures_39/Mapping.pdf", h =8, w =10)
+p.mapping
+dev.off()
+```
+
+
+Based on the output obove, we removed one outlier, which had excessively higher Unassigned_Unmapped and Unassigned_NoFeatures reads,from the analysis.
+```{r}
+metadata=readxl::read_xlsx("SampleInfo_updated.xlsx")
+#remove sample 39 from metadata
+metadata <- metadata[-39,]
+# 
+# fc=readRDS("featureCount_stranded.rds")
+counts=fc$count
+#remove sample 39 from count table
+counts <- counts[,-33]
+```
+
+# Add a new column/factor by concatenating Day and Treatment
+```{r}
+metadata$group=paste(metadata$Day, metadata$Treatment, sep = "_")
+metadata$ID1=paste(metadata$Tissue, metadata$Day, metadata$Diet, metadata$Rep, sep = ".")
+metadata$Treatment <- factor(metadata$Treatment, levels = c("L","HL","H","LH"))
+table(metadata$group)
+```
+
+# Clean up colume names and change the order of samples in the count matrix
+We also change the name to ID1 so that it is more informative
+```{r}
+colnames(counts) <- gsub(".bamAligned.out.bam","",colnames(counts))
+counts=counts[,metadata$ID]
+colnames(counts) <- metadata$ID1
+meta=as.data.frame(metadata)
+rownames(meta) <- meta$ID1
+```
+
+# Generate an annotation table for all the genes in the count matrix
+The "Dme_annotation.xlsx" was download from KEGG website and contain all KEGG id for pathview analysis
+```{r}
+ano_dme = openxlsx::read.xlsx("tables/Dme_annotation.xlsx")
+ids <- rownames(counts)
+ann <-bitr(ids, fromType = "FLYBASE", toType = c("SYMBOL", "ENTREZID","GENENAME"), OrgDb="org.Dm.eg.db")
+```
+
+
+```{r}
+ann_tab <- data.frame(row.names = ids, FLYBASE=ids, SYMBOL=NA, ENTREZID=NA, KEGG=NA, GENENAME=NA)
+ann_tab$SYMBOL <- ann$SYMBOL[match(ann_tab$FLYBASE, ann$FLYBASE)]
+ann_tab$ENTREZID <- ann$ENTREZID[match(ann_tab$FLYBASE, ann$FLYBASE)]
+ann_tab$GENENAME <- ann$GENENAME[match(ann_tab$FLYBASE, ann$FLYBASE)]
+ann_tab$KEGG <- ano_dme$KEGG[match(ann_tab$ENTREZID, ano_dme$NICD_geneID)]
+head(ann_tab)
+```
+
+# Data pre-processing
+We create a DGEList object, and calucate count-per-million (CMP) using the edgeR functions
+```{r}
+e <- DGEList(counts = counts, sample = metadata, group = as.factor(metadata$group))
+cpm <- cpm(e)
+lcpm <- cpm(e, log=TRUE)
+L <- mean(e$samples$lib.size) * 1e-6
+M <- median(e$samples$lib.size) * 1e-6
+c(L, M)
+```
+
+```{r}
+pdf("figures_39/library_size.pdf", w=8, h=4)
+barplot(e$samples$lib.size,names=colnames(e),las=2)
+title("Barplot of library sizes")
+dev.off()
+```
+
+```{r}
+pdf("figures_39/boxplot_unnormalized.pdf", w=8, h=4)
+boxplot(lcpm, xlab="", ylab="Log2 counts per million", las=2)
+abline(h=median(lcpm), col="blue")
+title("Boxplots of logCPMs (unnormalised)")
+dev.off()
+```
+
+# Normalize gene expression distributions
+```{r}
+e <- calcNormFactors(e, method = "TMM")
+cpm <- cpm(e)
+lcpm <- cpm(e, log=TRUE)
+pdf("figures_39/boxplot_normalized.pdf", w=8, h=4)
+boxplot(lcpm, xlab="", ylab="Log2 counts per million",las=2)
+abline(h=median(lcpm),col="red")
+title("Boxplots of logCPMs (normalized)")
+dev.off()
+```
+
+```{r}
+sampleDists <- dist(t(lcpm))
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- colnames(counts)
+colnames(sampleDistMatrix) <- colnames(counts)
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")) )(255)
+p1=pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+p1
+```
+
+```{r}
+pdf("figures_39/Sample_heatmap.pdf", h=8, w=8)
+p1
+dev.off()
+```
+
+# Perform PCA analysis to inspect sample relationship
+```{r}
+pca <- prcomp(t(lcpm))
+df <- cbind(meta, pca$x)
+p1 <- ggplot(df) + geom_point(aes(x=PC1, y=PC2, color = Treatment, shape = Day))
+p1
+p2 <- ggplot(df) + geom_point(aes(x=PC3, y=PC4, color = Treatment, shape = Day))
+p2
+p3 <- cowplot::plot_grid(p1,p2, rel_widths = c(1,1.25))
+p3
+```
+
+```{r}
+pdf("figures_39/PCA_all_1234.pdf", h=4, w=9.5)
+p3
+dev.off()
+```
+
+```{r}
+pdf("figures_39/PCA_all.pdf", h=5, w=6)
+p1+ggtitle("All Tissues")
+dev.off()
+```
+
+
+
+```{r}
+df_A <- df %>% filter(Tissue=="A")
+df_H <- df %>% filter(Tissue=="H")
+df_T <- df %>% filter(Tissue=="T")
+p4 <- ggplot(df_A) + geom_point(aes(x=PC1, y=PC2, color = Treatment, shape = Day))+theme(legend.position = "none")+ggtitle("Abdomen")
+p5 <- ggplot(df_H) + geom_point(aes(x=PC1, y=PC2, color = Treatment, shape = Day))+theme(legend.position = "none")+ggtitle("Head")
+p6 <- ggplot(df_T) + geom_point(aes(x=PC1, y=PC2, color = Treatment, shape = Day))+ggtitle("Thorax")
+p7 <- cowplot::plot_grid(p4,p5,p6, rel_widths = c(1,1,1.25), ncol = 3)
+p7
+```
+
+```{r}
+pdf("figures_39/PCA_tissue.pdf", h=4, w=12.5)
+p7
+dev.off()
+```
+
+# DE analysis
+# create a dds object for all samples
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                          colData = metadata,
+                          design = ~ group)
+```
+
+# select a particular tissue
+```{r}
+dds.A=dds[,dds$Tissue == "A"]
+dds.A=DESeq(dds.A)
+```
+
+
+find all different pairwise comparisons. You could have 15 different combinations. You should figure out which comparisons make most sense for your design.
+```{r}
+res0A <- results(object = dds.A, contrast=c("group", "D50_H" ,"D50_L"))
+res1A <- results(object = dds.A, contrast=c("group", "D52_LH" ,"D50_L"))
+res2A <- results(object = dds.A, contrast=c("group", "D52_HL" ,"D50_H"))
+res3A <- results(object = dds.A, contrast=c("group", "D55_LH" ,"D52_LH"))
+res4A <- results(object = dds.A, contrast=c("group", "D55_HL" ,"D52_HL"))
+res5A <- results(object = dds.A, contrast=c("group", "D55_LH" ,"D50_L"))
+res6A <- results(object = dds.A, contrast=c("group", "D55_HL" ,"D50_H"))
+```
+
+
+```{r}
+summary(res0A, alpha= 0.05)
+summary(res1A, alpha= 0.05)
+summary(res2A, alpha= 0.05)
+summary(res3A, alpha= 0.05)
+summary(res4A, alpha= 0.05)
+summary(res5A, alpha= 0.05)
+summary(res6A, alpha= 0.05)
+```
+
+# create a table for Venn
+```{r}
+df0.A=data.frame(key = "A.D50.HvsL", Feature = rownames(res0A), logFC = res0A$log2FoldChange, adj.P.Val=res0A$padj)
+df1.A=data.frame(key = "A.D52vsD50.LH", Feature = rownames(res1A), logFC = res1A$log2FoldChange, adj.P.Val=res1A$padj)
+df2.A=data.frame(key = "A.D52vsD50.HL", Feature = rownames(res2A), logFC = res2A$log2FoldChange, adj.P.Val=res2A$padj)
+df3.A=data.frame(key = "A.D55vsD52.LH", Feature = rownames(res3A), logFC = res3A$log2FoldChange, adj.P.Val=res3A$padj)
+df4.A=data.frame(key = "A.D55vsD52.HL", Feature = rownames(res4A), logFC = res4A$log2FoldChange, adj.P.Val=res4A$padj)
+df5.A=data.frame(key = "A.D55vsD50.LH", Feature = rownames(res5A), logFC = res5A$log2FoldChange, adj.P.Val=res5A$padj)
+df6.A=data.frame(key = "A.D55vsD50.HL", Feature = rownames(res6A), logFC = res6A$log2FoldChange, adj.P.Val=res6A$padj)
+forVennt=do.call("rbind", list(df0.A, df1.A, df2.A, df3.A, df4.A, df5.A, df6.A))
+```
+
+
+# select head only
+```{r}
+dds.H=dds[,dds$Tissue == "H"]
+dds.H=DESeq(dds.H)
+```
+
+```{r}
+res0H <- results(object = dds.H, contrast=c("group", "D50_H" ,"D50_L"))
+res1H <- results(object = dds.H, contrast=c("group", "D52_LH" ,"D50_L"))
+res2H <- results(object = dds.H, contrast=c("group", "D52_HL" ,"D50_H"))
+res3H <- results(object = dds.H, contrast=c("group", "D55_LH" ,"D52_LH"))
+res4H <- results(object = dds.H, contrast=c("group", "D55_HL" ,"D52_HL"))
+res5H <- results(object = dds.H, contrast=c("group", "D55_LH" ,"D50_L"))
+res6H <- results(object = dds.H, contrast=c("group", "D55_HL" ,"D50_H"))
+```
+
+
+```{r}
+summary(res0H, alpha= 0.05)
+summary(res1H, alpha= 0.05)
+summary(res2H, alpha= 0.05)
+summary(res3H, alpha= 0.05)
+summary(res4H, alpha= 0.05)
+summary(res5H, alpha= 0.05)
+summary(res6H, alpha= 0.05)
+```
+# Add Head results to Venn Table
+```{r}
+df0H=data.frame(key = "H.D50.HvsL", Feature = rownames(res0H), logFC = res0H$log2FoldChange, adj.P.Val=res0H$padj)
+df1H=data.frame(key = "H.D52vsD50.LH", Feature = rownames(res1H), logFC = res1H$log2FoldChange, adj.P.Val=res1H$padj)
+df2H=data.frame(key = "H.D52vsD50.HL", Feature = rownames(res2H), logFC = res2H$log2FoldChange, adj.P.Val=res2H$padj)
+df3H=data.frame(key = "H.D55vsD52.LH", Feature = rownames(res3H), logFC = res3H$log2FoldChange, adj.P.Val=res3H$padj)
+df4H=data.frame(key = "H.D55vsD52.HL", Feature = rownames(res4H), logFC = res4H$log2FoldChange, adj.P.Val=res4H$padj)
+df5H=data.frame(key = "H.D55vsD50.LH", Feature = rownames(res5H), logFC = res5H$log2FoldChange, adj.P.Val=res5H$padj)
+df6H=data.frame(key = "H.D55vsD50.HL", Feature = rownames(res6H), logFC = res6H$log2FoldChange, adj.P.Val=res6H$padj)
+forVennt=do.call("rbind", list(forVennt, df0H, df1H, df2H, df3H, df4H, df5H, df6H))
+```
+
+
+# select thorax only
+```{r}
+dds.T=dds[,dds$Tissue == "T"]
+dds.T=DESeq(dds.T)
+```
+
+```{r}
+res0T <- results(object = dds.T, contrast=c("group", "D50_H" ,"D50_L"))
+res1T <- results(object = dds.T, contrast=c("group", "D52_LH" ,"D50_L"))
+res2T <- results(object = dds.T, contrast=c("group", "D52_HL" ,"D50_H"))
+res3T <- results(object = dds.T, contrast=c("group", "D55_LH" ,"D52_LH"))
+res4T <- results(object = dds.T, contrast=c("group", "D55_HL" ,"D52_HL"))
+res5T <- results(object = dds.T, contrast=c("group", "D55_LH" ,"D50_L"))
+res6T <- results(object = dds.T, contrast=c("group", "D55_HL" ,"D50_H"))
+```
+
+
+```{r}
+summary(res0T, alpha= 0.05)
+summary(res1T, alpha= 0.05)
+summary(res2T, alpha= 0.05)
+summary(res3T, alpha= 0.05)
+summary(res4T, alpha= 0.05)
+summary(res5T, alpha= 0.05)
+summary(res6T, alpha= 0.05)
+```
+
+
+# create a table for Venn
+```{r}
+df0T=data.frame(key = "T.D50.HvsL", Feature = rownames(res0T), logFC = res0T$log2FoldChange, adj.P.Val=res0T$padj)
+df1T=data.frame(key = "T.D52vsD50.LH", Feature = rownames(res1T), logFC = res1T$log2FoldChange, adj.P.Val=res1T$padj)
+df2T=data.frame(key = "T.D52vsD50.HL", Feature = rownames(res2T), logFC = res2T$log2FoldChange, adj.P.Val=res2T$padj)
+df3T=data.frame(key = "T.D55vsD52.LH", Feature = rownames(res3T), logFC = res3T$log2FoldChange, adj.P.Val=res3T$padj)
+df4T=data.frame(key = "T.D55vsD52.HL", Feature = rownames(res4T), logFC = res4T$log2FoldChange, adj.P.Val=res4T$padj)
+df5T=data.frame(key = "T.D55vsD50.LH", Feature = rownames(res5T), logFC = res5T$log2FoldChange, adj.P.Val=res5T$padj)
+df6T=data.frame(key = "T.D55vsD50.HL", Feature = rownames(res6T), logFC = res6T$log2FoldChange, adj.P.Val=res6T$padj)
+forVennt=do.call("rbind", list(forVennt, df0T, df1T, df2T, df3T, df4T, df5T, df6T))
+```
+
+
+# filter the table with a adjusted p value
+# We use 0.1 in order to filter down
+```{r}
+forVennt <- subset(forVennt, adj.P.Val < 0.1)
+table(forVennt$key)
+```
+
+# add annotation to the table
+```{r}
+forVennt$SYMBOL <- mapIds(org.Dm.eg.db, 
+                     keys=forVennt$Feature, 
+                     column="SYMBOL", 
+                     keytype="FLYBASE",
+                     multiVals="first")
+```
+
+```{r}
+
+write.table(as.data.frame(forVennt), "tables_39/forVennt.csv", quote = F, sep = ",", row.names = F)
+```
+
+
+```{r}
+# df=forVennt %>% filter(adj.P.Val<0.05);dim(df)
+df=forVennt %>% filter(adj.P.Val<0.05, !grepl('D55vsD52', key));dim(df)
+table(df$key)
+
+#create a df for looking at Abdomen Tissue only
+df.A=df[df$tissue == "A",]
+table(df.A$key)
+
+#create a df for looking at Head Tissue only
+df.H=df[df$tissue == "H",]
+table(df.H$key)
+
+#create a df for looking at Thorax Tissue only
+df.T=df[df$tissue == "T",]
+table(df.T$key)
+```
+
+```{r}
+library(biomaRt)
+ensembl <- useEnsembl(biomart = "ensembl", 
+                      dataset = "dmelanogaster_gene_ensembl")
+ann_fm <- getBM(mart = ensembl,
+      filters = "ensembl_gene_id",
+      values = ids,
+      attributes = c("ensembl_gene_id", 
+                     "external_gene_name", 
+                     "mmusculus_homolog_ensembl_gene", 
+                     "mmusculus_homolog_associated_gene_name"))
+```
+
+
+
+```{r}
+forVennt$tissue = substr(forVennt$key, 1, 1)
+sigGenes = forVennt %>% filter(adj.P.Val < 0.01) %>% 
+  group_by(Feature) %>% summarise(n=n()) %>% filter(n>8)
+mat <- lcpm[unique(sigGenes$Feature),]
+meta = metadata[,c(7,8,11)]
+
+rownames(meta)=metadata$ID1
+geneNames=ann_fm$external_gene_name[match(rownames(mat), ann_fm$ensembl_gene_id)]
+
+```
+
+# Create a heatmap of all DEG
+```{r}
+pdf("figures_39/Heatmap_intersection.pdf", w=10, h=10)
+pheatmap(mat, scale="row",show_rownames = F, labels_row = geneNames, border_color =NA, annotation_col = data.frame(meta),cutree_rows=4,
+         # col=colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(200), 
+         col = colorRampPalette(c("navy", "white", "firebrick3"))(50),
+  main = "")
+dev.off()
+```
+
+# Create a heatmap of DEG in Abdomen
+```{r}
+mat.A <- mat[,(1:18)]
+
+pdf("figures_39/Heatmap_Abdomen.pdf", w=3.5, h=7)
+pheatmap(mat.A, scale="row",show_rownames = F, labels_row = geneNames, border_color =NA, annotation_col = data.frame(meta),cutree_rows=4, col = colorRampPalette(c("navy", "white", "firebrick3"))(50), main = "")
+dev.off()
+```
+
+# Create a heatmap of DEG in Thorax
+```{r}
+mat.T <- mat[,(19:36)]
+
+pdf("figures_39/Heatmap_Thorax.pdf", w=3.5, h=7)
+pheatmap(mat.T, scale="row",show_rownames = F, labels_row = geneNames, border_color =NA, annotation_col = data.frame(meta),cutree_rows=4, col = colorRampPalette(c("navy", "white", "firebrick3"))(50), main = "")
+dev.off()
+```
+
+# Create a heatmap of DEG in Head
+```{r}
+mat.H <- mat[,(37:53)]
+
+pdf("figures_39/Heatmap_Head.pdf", w=3.5, h=7)
+pheatmap(mat.H, scale="row",show_rownames = F, labels_row = geneNames, border_color =NA, annotation_col = data.frame(meta),cutree_rows=4, col = colorRampPalette(c("navy", "white", "firebrick3"))(50), main = "")
+dev.off()
+```
+
+# Functional Enrichment for Thorax
+```{r}
+geneList <- split(df.T$Feature, df.T$key)
+bg <- rownames(res0H)
+
+ego.bp = compareCluster(geneClusters = geneList, fun = "enrichGO", 
+                     #universe      = bg,
+                     keyType = "FLYBASE",
+                     OrgDb         = org.Dm.eg.db,
+                     ont           = "BP",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff  = 0.01,
+                     qvalueCutoff  = 0.05)
+
+dotplot(ego.bp, showCategory = 5, font.size = 8)+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r}
+ego.mf = compareCluster(geneClusters = geneList, fun = "enrichGO", 
+                     #universe      = bg,
+                     keyType = "FLYBASE",
+                     OrgDb         = org.Dm.eg.db,
+                     ont           = "MF",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff  = 0.01,
+                     qvalueCutoff  = 0.05)
+
+dotplot(ego.mf, showCategory = 5, font.size = 8)+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+
+```{r}
+ego.cc = compareCluster(geneClusters = geneList, fun = "enrichGO", 
+                     #universe      = bg,
+                     keyType = "FLYBASE",
+                     OrgDb         = org.Dm.eg.db,
+                     ont           = "CC",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff  = 0.01,
+                     qvalueCutoff  = 0.05)
+
+dotplot(ego.cc, showCategory = 5, font.size = 8)+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r}
+ids<-bitr(df.T$Feature, fromType = "FLYBASE", toType = "ENTREZID", OrgDb="org.Dm.eg.db")
+df.T$ENTREZID=ids$ENTREZID[match(df.T$Feature, ids$FLYBASE)]
+#bg.e=ids$ENTREZID[match(bg, ids$FLYBASE)]
+#bg.e=bg.e[!is.na(bg.e)]
+
+df1 <- df.T[!is.na(df.T$ENTREZID),]
+geneList1=split(df1$ENTREZID, df1$key)
+
+kk = compareCluster(geneClusters = geneList1, fun = "enrichKEGG", 
+                    keyType = "ncbi-geneid",
+                    organism = 'dme',
+                    pvalueCutoff = 0.05)
+dotplot(kk, showCategory = 5, font.size = 8)
+```
+
+
+```{r}
+pdf("figures_39/Functional_Enrichment_Thorax 0.05.pdf", w =12, h =8)
+dotplot(ego.bp, showCategory = 8, font.size = 8)+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+ggtitle("Biological Process")
+dotplot(ego.mf, showCategory = 8, font.size = 8)+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+ggtitle("Molecular Function")
+dotplot(ego.cc, showCategory = 8, font.size = 8)+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+ggtitle("Cellular Component")
+dotplot(kk, showCategory = 8, font.size = 8)+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+ggtitle("KEGG Pathways")
+dev.off()
+```
+
+# Functional Enrichment for All
+```{r}
+geneList <- split(df$Feature, df$key)
+#bg <- rownames(res0)
+
+ego.bp = compareCluster(geneClusters = geneList, fun = "enrichGO", 
+                     #universe      = bg,
+                     keyType = "FLYBASE",
+                     OrgDb         = org.Dm.eg.db,
+                     ont           = "BP",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff  = 0.01,
+                     qvalueCutoff  = 0.05)
+
+dotplot(ego.bp, showCategory = 5, font.size = 8)+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r}
+ego.mf = compareCluster(geneClusters = geneList, fun = "enrichGO", 
+                     #universe      = bg,
+                     keyType = "FLYBASE",
+                     OrgDb         = org.Dm.eg.db,
+                     ont           = "MF",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff  = 0.01,
+                     qvalueCutoff  = 0.05)
+
+dotplot(ego.mf, showCategory = 5, font.size = 8)+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+
+```{r}
+ego.cc = compareCluster(geneClusters = geneList, fun = "enrichGO", 
+                     #universe      = bg,
+                     keyType = "FLYBASE",
+                     OrgDb         = org.Dm.eg.db,
+                     ont           = "CC",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff  = 0.01,
+                     qvalueCutoff  = 0.05)
+
+dotplot(ego.cc, showCategory = 5, font.size = 8)+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r}
+ids<-bitr(df$Feature, fromType = "FLYBASE", toType = "ENTREZID", OrgDb="org.Dm.eg.db")
+df$ENTREZID=ids$ENTREZID[match(df$Feature, ids$FLYBASE)]
+#bg.e=ids$ENTREZID[match(bg, ids$FLYBASE)]
+#bg.e=bg.e[!is.na(bg.e)]
+
+df1 <- df[!is.na(df$ENTREZID),]
+geneList1=split(df1$ENTREZID, df1$key)
+
+kk = compareCluster(geneClusters = geneList1, fun = "enrichKEGG", 
+                    keyType = "ncbi-geneid",
+                    organism = 'dme',
+                    pvalueCutoff = 0.05)
+dotplot(kk, showCategory = 5, font.size = 8)
+```
+
+
+```{r}
+pdf("figures_39/Functional_Enrichmenet.pdf", w =12, h =8)
+dotplot(ego.bp, showCategory = 8, font.size = 8)+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+ggtitle("Biological Process")
+dotplot(ego.mf, showCategory = 8, font.size = 8)+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+ggtitle("Molecular Function")
+dotplot(ego.cc, showCategory = 8, font.size = 8)+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+ggtitle("Cellular Component")
+dotplot(kk, showCategory = 8, font.size = 8)+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+ggtitle("KEGG Pathways")
+dev.off()
+
+
+
+
+# find common DE genes from low-to-high change
+```{r}
+metadata1=metadata %>% filter(select=='L2H')
+counts1=counts[,metadata1$ID1];dim(counts1)
+
+dds1 <- DESeqDataSetFromMatrix(countData = counts1,
+                              colData = metadata1,
+                              design = ~ Diet)
+
+dds1 = DESeq(dds1)
+res.LH = results(dds1, contrast=c("Diet","H","L"))
+summary(res.LH, alpha= 0.05)
+```
+
+# find common DE genes from high-to-low change
+```{r}
+metadata2=metadata %>% filter(select=='H2L')
+counts2=counts[,metadata2$ID1];dim(counts2)
+
+dds2 <- DESeqDataSetFromMatrix(countData = counts2,
+                              colData = metadata2,
+                              design = ~ Diet)
+
+dds2 = DESeq(dds2)
+res.HL = results(dds2, contrast=c("Diet","L","H"))
+summary(res.HL, alpha= 0.05)
+```
+
+
+```{r}
+df7=data.frame(key = "all_L2H", Feature = rownames(res.LH), logFC = res.LH$log2FoldChange, adj.P.Val=res.LH$padj)
+df8=data.frame(key = "all_H2L", Feature = rownames(res.HL), logFC = res.HL$log2FoldChange, adj.P.Val=res.HL$padj)
+df_all <- rbind(df7,df8)
+
+df_all$SYMBOL <- mapIds(org.Dm.eg.db, 
+                     keys=df_all$Feature, 
+                     column="SYMBOL", 
+                     keytype="FLYBASE",
+                     multiVals="first")
+```
+
+
+```{r}
+forVennt <- forVennt[,-6]
+forVennt <- rbind(forVennt, df_all)
+forVennt <- subset(forVennt, adj.P.Val < 0.1)
+table(forVennt$key)
+```
+
+```{r}
+forVennt$GENENAME <- mapIds(org.Dm.eg.db, 
+                     keys=forVennt$Feature, 
+                     column="GENENAME", 
+                     keytype="FLYBASE",
+                     multiVals="first")
+
+
+write.table(as.data.frame(forVennt), "tables_39/forVennt1.csv", quote = F, sep = ",", row.names = F)
+```
+
+# Create Heatmap of L2H DEG
+```{r}
+sigGenes=df7 %>% filter(adj.P.Val<0.01, abs(logFC)>0.5);dim(sigGenes)
+
+mat <- lcpm[sigGenes$Feature,metadata1$ID1]
+meta = metadata1[,c(7,8,11)]
+
+rownames(meta)=metadata1$ID1
+geneNames=ann_fm$external_gene_name[match(rownames(mat), ann_fm$ensembl_gene_id)]
+
+pheatmap(mat, scale="row",show_rownames = F, labels_row = geneNames, border_color =NA, annotation_col = data.frame(meta),cutree_rows=2,
+         # col=colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(200), 
+         col = colorRampPalette(c("navy", "white", "firebrick3"))(50),
+  main = "")
+```
+
+```{r}
+pdf("figures_39/Heatmap_all_L2H.pdf", w=10, h=10)
+pheatmap(mat, scale="row",show_rownames = F, labels_row = geneNames, border_color =NA, annotation_col = data.frame(meta),cutree_rows=2,
+         # col=colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(200), 
+         col = colorRampPalette(c("navy", "white", "firebrick3"))(50),
+  main = "")
+dev.off()
+```
+
+# Create Heatmap of H2L DEG
+```{r}
+sigGenes=df8 %>% filter(adj.P.Val<0.01, abs(logFC)>0.5);dim(sigGenes)
+
+mat <- lcpm[sigGenes$Feature,metadata2$ID1]
+meta = metadata2[,c(7,8,11)]
+
+rownames(meta)=metadata2$ID1
+geneNames=ann_fm$external_gene_name[match(rownames(mat), ann_fm$ensembl_gene_id)]
+
+pheatmap(mat, scale="row",show_rownames = F, labels_row = geneNames, border_color =NA, annotation_col = data.frame(meta),cutree_rows=2,
+         # col=colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(200), 
+         col = colorRampPalette(c("navy", "white", "firebrick3"))(50),
+  main = "")
+```
+
+```{r}
+pdf("figures_39/Heatmap_all_H2L.pdf", w=10, h=10)
+pheatmap(mat, scale="row",show_rownames = F, labels_row = geneNames, border_color =NA, annotation_col = data.frame(meta),cutree_rows=2,
+         # col=colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(200), 
+         col = colorRampPalette(c("navy", "white", "firebrick3"))(50),
+  main = "")
+dev.off()
+```
+
+
+#Setting up for Functional Enrichment L2H
+```{r}
+Sig_LH <- df7 %>% filter(adj.P.Val<0.01);dim(Sig_LH)
+bg <- rownames(res0)
+```
+
+
+```{r}
+ego2.bp <- enrichGO(gene         = Sig_LH$Feature,
+                #universe      = bg,
+                keyType       = "FLYBASE",
+                OrgDb         = org.Dm.eg.db,
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(summary(ego2.bp))
+ego2.bp <- setReadable(ego2.bp, OrgDb = org.Dm.eg.db)
+write.csv(as.data.frame(summary(ego2.bp)), "tables_39/GO_BP_all_L2H.csv")
+
+ego2.CC <- enrichGO(gene         = Sig_LH$Feature,
+                #universe      = bg,
+                keyType       = "FLYBASE",
+                OrgDb         = org.Dm.eg.db,
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+ego2.CC <- setReadable(ego2.CC, OrgDb = org.Dm.eg.db)
+write.csv(as.data.frame(summary(ego2.CC)), "tables_39/GO_CC_all_L2H.csv")
+
+ego2.MF <- enrichGO(gene         = Sig_LH$Feature,
+                #universe      = bg,
+                keyType       = "FLYBASE",
+                OrgDb         = org.Dm.eg.db,
+                ont           = "MF",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+ego2.MF <- setReadable(ego2.MF, OrgDb = org.Dm.eg.db)
+write.csv(as.data.frame(summary(ego2.MF)), "tables_39/GO_MF_all_L2H.csv")
+
+
+sigEnz=ann_tab$ENTREZID[match(Sig_LH$Feature, ann_tab$FLYBASE)]
+sigEnz=sigEnz[!is.na(sigEnz)]
+kk_L2H <- enrichKEGG(gene         = sigEnz,
+                 keyType = "ncbi-geneid",
+                 organism     = 'dme',
+                 pvalueCutoff = 0.05)
+write.csv(as.data.frame(summary(kk_L2H)), "tables_39/KEGG_all_L2H.csv")
+
+pdf("figures_39/Enrichment_all_L2H.pdf", w =8, h=8)
+barplot(ego2.bp, showCategory=20)
+barplot(ego2.CC, showCategory=20)
+barplot(ego2.MF, showCategory=20)
+barplot(kk_L2H, showCategory=20)
+dev.off()
+```
+
+# Repeat for H2L
+```{r}
+Sig_HL <- df8 %>% filter(adj.P.Val<0.05);dim(Sig_HL)
+```
+
+```{r}
+ego2.bp <- enrichGO(gene         = Sig_HL$Feature,
+                #universe      = bg,
+                keyType       = "FLYBASE",
+                OrgDb         = org.Dm.eg.db,
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(summary(ego2.bp))
+ego2.bp <- setReadable(ego2.bp, OrgDb = org.Dm.eg.db)
+write.csv(as.data.frame(summary(ego2.bp)), "tables_39/GO_BP_all_H2L.csv")
+
+ego2.CC <- enrichGO(gene         = Sig_HL$Feature,
+                #universe      = bg,
+                keyType       = "FLYBASE",
+                OrgDb         = org.Dm.eg.db,
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+ego2.CC <- setReadable(ego2.CC, OrgDb = org.Dm.eg.db)
+write.csv(as.data.frame(summary(ego2.CC)), "tables_39/GO_CC_all_H2L.csv")
+
+ego2.MF <- enrichGO(gene         = Sig_HL$Feature,
+                #universe      = bg,
+                keyType       = "FLYBASE",
+                OrgDb         = org.Dm.eg.db,
+                ont           = "MF",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+ego2.MF <- setReadable(ego2.MF, OrgDb = org.Dm.eg.db)
+write.csv(as.data.frame(summary(ego2.MF)), "tables_39/GO_MF_all_H2L.csv")
+
+
+sigEnz=ann_tab$ENTREZID[match(Sig_HL$Feature, ann_tab$FLYBASE)]
+sigEnz=sigEnz[!is.na(sigEnz)]
+kk_H2L <- enrichKEGG(gene         = sigEnz,
+                 keyType = "ncbi-geneid",
+                 organism     = 'dme',
+                 pvalueCutoff = 0.05)
+write.csv(as.data.frame(summary(kk_H2L)), "tables_39/KEGG_all_H2L.csv")
+
+pdf("figures_39/Enrichment_all_H2L.pdf", w =8, h=8)
+barplot(ego2.bp, showCategory=20)
+barplot(ego2.CC, showCategory=20)
+barplot(ego2.MF, showCategory=20)
+barplot(kk_H2L, showCategory=20)
+dev.off()
+```
+
+#SPIA analysis
+```{r}
+library(SPIA)
+DE = as.data.frame(res.LH) %>% filter(!is.na(padj), padj <0.01, abs(log2FoldChange)>0.5)
+DE$KEGG=ann_tab$KEGG[match(rownames(DE), ann_tab$FLYBASE)]
+DE=DE %>% filter(!is.na(KEGG));
+DE_L2H <- DE$log2FoldChange
+names(DE_L2H) <- as.vector(DE$KEGG)
+head(DE_L2H);length(DE_L2H)
+
+all_kegg <- ann_tab$KEGG[match(rownames(res.LH), ann_tab$FLYBASE)]
+all_kegg <- all_kegg[!is.na(all_kegg)]
+all_kegg <- unique(all_kegg)
+head(all_kegg);length(all_kegg)
+
+res_spia=spia(de=DE_L2H,all=all_kegg, organism="dme",data.dir="./data/", nB=2000, plots=FALSE, beta=NULL,combine="fisher",verbose=T)
+plotP(res_spia)
+
+pdf("figures/SPIA_all_L2H.pdf")
+plotP(res_spia)
+dev.off()
+write_csv(res_spia, "tables/SPIA_L2H.csv")
+```
+
+
+```{r}
+library(pathview)
+pv.out <- pathview(gene.data = DE_L2H, 
+                   gene.idtype="kegg",
+                   pathway.id = "04068", species = "dme", out.suffix = "dme.kegg",
+                   kegg.native = T, same.layer=T)
+
+pv.out <- pathview(gene.data = DE_L2H, 
+                   gene.idtype="kegg",
+                   pathway.id = "04140", species = "dme", out.suffix = "dme.kegg",
+                   kegg.native = T, same.layer=T)
+
+pv.out <- pathview(gene.data = DE_L2H, 
+                   gene.idtype="kegg",
+                   pathway.id = "04213", species = "dme", out.suffix = "dme.kegg",
+                   kegg.native = T, same.layer=T)
+
+pv.out <- pathview(gene.data = DE_L2H, 
+                   gene.idtype="kegg",
+                   pathway.id = "04624", species = "dme", out.suffix = "dme.kegg",
+                   kegg.native = T, same.layer=T)
+```
+
+
+
